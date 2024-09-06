@@ -18,7 +18,7 @@ use crate::graphics::{
     BorderRadius, PixelFormat, Rgba8Pixel, SharedImageBuffer, SharedPixelBuffer,
 };
 use crate::item_rendering::{CachedRenderingData, DirtyRegion, RenderBorderRectangle, RenderImage};
-use crate::items::{ItemRc, TextOverflow, TextWrap};
+use crate::items::{ItemRc, TextOverflow, TextWrap, FillRule};
 use crate::lengths::{LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalPx, LogicalRect, LogicalSize, LogicalVector, PhysicalPx, PointLengths, RectLengths, ScaleFactor, SizeLengths};
 use crate::renderer::{Renderer, RendererSealed};
 use crate::textlayout::{AbstractFont, FontMetrics, TextParagraphLayout};
@@ -29,6 +29,8 @@ use alloc::rc::{Rc, Weak};
 use alloc::{vec, vec::Vec};
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
+use std::ops::Add;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use euclid::Length;
 use lyon_path::Event;
 use lyon_path::math::Point;
@@ -37,7 +39,7 @@ use fixed::Fixed;
 use num_traits::Float;
 use num_traits::NumCast;
 #[cfg(feature = "std")]
-use resvg::{tiny_skia::{FillRule, Stroke, Paint, Pixmap, PathBuilder, Transform as TinySkiaTransform}};
+use resvg::{tiny_skia::{FillRule as TinySkiaFillRule, Stroke, Paint, Pixmap, PathBuilder, Transform as TinySkiaTransform}};
 pub use draw_functions::{PremultipliedRgbaColor, Rgb565Pixel, TargetPixel};
 
 type PhysicalLength = euclid::Length<i16, PhysicalPx>;
@@ -2543,38 +2545,25 @@ impl<'a, T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'
 
     #[cfg(feature = "std")]
     fn draw_path(&mut self, path: Pin<&crate::items::Path>, item: &ItemRc, size: LogicalSize) {
+        let _strokecolor = path.as_ref().stroke().color();
+        let now = Instant::now();
         let geom = LogicalRect::from(size);
         let phys_size = geom.size_length().cast() * self.scale_factor;
 
-        let color = path.as_ref().stroke().color();
-        println!("color: {}", color);
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(
-            color.red(),
-            color.green(),
-            color.blue(),
-            color.alpha(),
-        );
-        // paint.set_color_rgba8(
-        //     255,
-        //     255,
-        //     0,
-        //     255,
-        // );
-        paint.anti_alias = true;
 
         let mut pb = PathBuilder::new();
 
         let (logical_offset, path_events) = path.fitted_path_events(item).unwrap();
 
+        // println!("sz: w:{} h:{}", phys_size.width, phys_size.height);
+        // println!("offset: x:{} y:{}", logical_offset.x, logical_offset.y);
+
         for event in path_events.iter() {
             match event {
                 Event::Begin { at } => {
-                    println!("event: begin");
                     pb.move_to(at.x, at.y)
                 }
                 Event::Line { from: _, to } => {
-                    println!("event: line");
                     pb.line_to(to.x, to.y)
                 }
                 Event::Quadratic { from: _, ctrl, to } => {
@@ -2598,21 +2587,69 @@ impl<'a, T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'
             }
         }
 
-        let mut stroke = Stroke::default();
-        stroke.width = 2.0;
 
+        let path_props = path.as_ref();
+        let mut paint = Paint::default();
+        paint.anti_alias = true;
         let resolved_path = pb.finish().unwrap();
 
         let mut pixmap = Pixmap::new(phys_size.width as u32, phys_size.width as u32).unwrap();
+
+
+
+        // stroke
+        let mut painter_stroke = Stroke::default();
+        painter_stroke.width = (path_props.stroke_width() * self.scale_factor).get();
+        let stroke_color = path_props.stroke().color();
+        paint.set_color(resvg::tiny_skia::Color::from(stroke_color));
+
         pixmap.stroke_path(
             &resolved_path,
             &paint,
-            &stroke,
+            &painter_stroke,
             TinySkiaTransform::identity(),
             None
         );
 
-        self.processor.process_path(PhysicalRect::from_size(phys_size.cast()), SkiaPixmapCommand {
+        // fill
+        let fill_rule = match path_props.fill_rule() {
+            FillRule::Evenodd => TinySkiaFillRule::EvenOdd,
+            FillRule::Nonzero => TinySkiaFillRule::Winding
+        };
+        let fill_color = path_props.fill().color();
+        paint.set_color(resvg::tiny_skia::Color::from(fill_color));
+
+        let now_pixmap = Instant::now();
+
+        pixmap.fill_path(
+            &resolved_path,
+            &paint,
+            fill_rule,
+            TinySkiaTransform::identity(),
+            None
+        );
+
+        let tmp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros();
+
+        pixmap.save_png(format!("tmp_pixmap_{tmp}.png")).unwrap();
+
+        println!("bench (draw_path->fill_path): {}μs", now_pixmap.elapsed().as_micros());
+
+        let elapsed = now.elapsed();
+        println!("bench (draw_path): {}μs", elapsed.as_micros());
+
+        let geometry = PhysicalRect::new(
+            // (logical_offset * self.scale_factor).to_point().cast(),
+            ((self.current_state.offset.add(logical_offset)) * self.scale_factor).cast(),
+            phys_size.cast()
+        );
+
+        let x = geometry;
+
+        println!("x: {}; y: {}", geometry.origin.x, geometry.origin.y);
+        println!("w: {}; h: {}", geometry.size.width, geometry.size.height);
+
+        self.processor.process_path(geometry, SkiaPixmapCommand {
             pixmap
         })
     }
@@ -2773,6 +2810,17 @@ impl<'a, T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'
 
     fn as_any(&mut self) -> Option<&mut dyn core::any::Any> {
         None
+    }
+}
+
+impl From<Color> for resvg::tiny_skia::Color {
+    fn from(value: Color) -> Self {
+        Self::from_rgba8(
+            value.red(),
+            value.green(),
+            value.blue(),
+            value.alpha()
+        )
     }
 }
 
