@@ -6,11 +6,13 @@
 //! This is the module for the functions that are drawing the pixels
 //! on the line buffer
 
+use std::time::Instant;
 use super::{PhysicalLength, PhysicalRect, SkiaPixmapCommand};
 use crate::graphics::{PixelFormat, Rgb8Pixel};
 use crate::lengths::{PointLengths, SizeLengths};
 use crate::software_renderer::fixed::Fixed;
 use crate::Color;
+use resvg::{tiny_skia};
 use derive_more::{Add, Mul, Sub};
 use integer_sqrt::IntegerSquareRoot;
 
@@ -411,8 +413,8 @@ pub(super) fn draw_rounded_rectangle_line(
                         .saturating_sub((rr.left_clip.get() + extra_left_clip) as u32)
                         .min(width as u32) as usize
                         ..x3.floor()
-                            .saturating_sub((rr.left_clip.get() + extra_left_clip) as u32)
-                            .min(width as u32) as usize],
+                        .saturating_sub((rr.left_clip.get() + extra_left_clip) as u32)
+                        .min(width as u32) as usize],
                     rr.border_color,
                 )
             }
@@ -616,37 +618,28 @@ pub(super) fn draw_gradient_line(
 pub(super) fn draw_skia_pixmap_line(
     span: &PhysicalRect,
     line: PhysicalLength,
-    cmd: &super::SkiaPixmapCommand,
+    cmd: &SkiaPixmapCommand,
     line_buffer: &mut [impl TargetPixel],
 ) {
+    let start = Instant::now();
     let y = line.0;
     let min_y = span.origin.y;
     let max_y = span.origin.y + span.size.height;
 
     if y > min_y && y < max_y {
         for (index, pix) in line_buffer.iter_mut().enumerate() {
-            let pixmap_x = index as u32 - span.origin.x as u32;
-            let pixmap_y = y as u32 - span.origin.y as u32;
+            let pixmap_x = index;
+            let pixmap_y = y - span.origin.y;
 
-            if pixmap_x > 0 && pixmap_x < span.size.width as u32 {
-                let pixmap = cmd.pixmap.pixel(pixmap_x, pixmap_y);
-                match pixmap {
-                    Some(pixmap_pix) => {
-                        pix.blend(PremultipliedRgbaColor {
-                            red: pixmap_pix.red(),
-                            green: pixmap_pix.green(),
-                            blue: pixmap_pix.blue(),
-                            alpha: pixmap_pix.alpha(),
-                        })
-                    }
-                    None => {}
-                }
+            let pixmap = cmd.pixmap.pixel(pixmap_x as u32, pixmap_y as u32);
+            match pixmap {
+                Some(pixmap_pix) => pix.blend(PremultipliedRgbaColor::from(pixmap_pix)),
+                None => {}
             }
         }
     }
 
-    println!("line: {}", line.0);
-    println!("line_buffer sz: {}", line_buffer.len());
+    // println!("bench (draw_line): {}μs", start.elapsed().as_micros());
 }
 
 /// A color whose component have been pre-multiplied by alpha
@@ -671,6 +664,18 @@ pub struct PremultipliedRgbaColor {
 impl From<Color> for PremultipliedRgbaColor {
     fn from(col: Color) -> Self {
         Self::premultiply(col)
+    }
+}
+
+/// Convert a tiny_skia premultiplied color u8 color to a internal premultiplied one
+impl From<tiny_skia::PremultipliedColorU8> for PremultipliedRgbaColor {
+    fn from(col: tiny_skia::PremultipliedColorU8) -> Self {
+        Self {
+            red: col.red(),
+            green: col.green(),
+            blue: col.blue(),
+            alpha: col.alpha(),
+        }
     }
 }
 

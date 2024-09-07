@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
-
+use std::time::Instant;
 use euclid::approxeq::ApproxEq;
 use i_slint_core::graphics::boxshadowcache::BoxShadowCache;
 use i_slint_core::graphics::euclid::num::Zero;

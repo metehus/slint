@@ -85,6 +85,7 @@ clru = { workspace = true, optional = true }
 resvg = { workspace = true, optional = true }
 fontdb = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+zeno = { workspace = true, optional = false }
 
 raw-window-handle-06 = { workspace = true, optional = true }
 bitflags = { version = "2.4.2"}
